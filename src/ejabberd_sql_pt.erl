@@ -271,7 +271,7 @@ parse1([$%, $( | S], Acc, State) ->
                                      params = [Var | State3#state.params],
                                      param_pos = State3#state.param_pos + 1};
                     false ->
-                        append_string("true", State3)
+                        append_string("0=0", State3)
                 end;
             _ ->
                 Convert =
