@@ -47,10 +47,10 @@ init(_Host, _Opts) ->
 remove_user(LUser, LServer) ->
     ejabberd_sql:sql_query(
       LServer,
-      ?SQL("delete from archive where username=%(LUser)s")),
+      ?SQL("delete from archive where username=%(LUser)s and %(LServer)H")),
     ejabberd_sql:sql_query(
       LServer,
-      ?SQL("delete from archive_prefs where username=%(LUser)s")).
+      ?SQL("delete from archive_prefs where username=%(LUser)s and %(LServer)H")).
 
 remove_room(LServer, LName, LHost) ->
     LUser = jid:encode({LName, LHost, <<>>}),
@@ -86,16 +86,17 @@ store(Pkt, LServer, {LUser, LHost}, Type, Peer, Nick, _Dir) ->
     SType = misc:atom_to_binary(Type),
     case ejabberd_sql:sql_query(
            LServer,
-           ?SQL("insert into archive (username, timestamp,"
-                " peer, bare_peer, xml, txt, kind, nick) values ("
-		"%(SUser)s, "
-		"%(TSinteger)d, "
-		"%(LPeer)s, "
-		"%(BarePeer)s, "
-		"%(XML)s, "
-		"%(Body)s, "
-		"%(SType)s, "
-		"%(Nick)s)")) of
+           ?SQL_INSERT(
+              "archive",
+              ["username=%(SUser)s",
+               "server_host=%(LServer)s",
+               "timestamp=%(TSinteger)d",
+               "peer=%(LPeer)s",
+               "bare_peer=%(BarePeer)s",
+               "xml=%(XML)s",
+               "txt=%(Body)s",
+               "kind=%(SType)s",
+               "nick=%(Nick)s"])) of
 	{updated, _} ->
 	    {ok, ID};
 	Err ->
@@ -113,6 +114,7 @@ write_prefs(LUser, _LServer, #archive_prefs{default = Default,
             ServerHost,
             "archive_prefs",
             ["!username=%(LUser)s",
+             "!server_host=%(ServerHost)s",
              "def=%(SDefault)s",
              "always=%(SAlways)s",
              "never=%(SNever)s"]) of
@@ -126,7 +128,7 @@ get_prefs(LUser, LServer) ->
     case ejabberd_sql:sql_query(
 	   LServer,
 	   ?SQL("select @(def)s, @(always)s, @(never)s from archive_prefs"
-                " where username=%(LUser)s")) of
+                " where username=%(LUser)s and %(LServer)H")) of
 	{selected, [{SDefault, SAlways, SNever}]} ->
 	    Default = erlang:binary_to_existing_atom(SDefault, utf8),
 	    Always = ejabberd_sql:decode_term(SAlways),
@@ -192,8 +194,13 @@ export(_Server) ->
                 SDefault = erlang:atom_to_binary(Default, utf8),
                 SAlways = misc:term_to_expr(Always),
                 SNever = misc:term_to_expr(Never),
-                [?SQL("insert into archive_prefs (username, def, always, never) values"
-                "(%(LUser)s, %(SDefault)s, %(SAlways)s, %(SNever)s);")];
+                [?SQL_INSERT(
+                    "archive_prefs",
+                    ["username=%(LUser)s",
+                     "server_host=%(LServer)s",
+                     "def=%(SDefault)s",
+                     "always=%(SAlways)s",
+                     "never=%(SNever)s"])];
           (_Host, _R) ->
               []
       end},
@@ -213,11 +220,17 @@ export(_Server) ->
                 XML = fxml:element_to_binary(Pkt),
                 Body = fxml:get_subtag_cdata(Pkt, <<"body">>),
                 SType = misc:atom_to_binary(Type),
-                [?SQL("insert into archive (username, timestamp, "
-				 "peer, bare_peer, xml, txt, kind, nick) "
-				 "values (%(SUser)s, %(TStmp)d, %(LPeer)s, "
-				 "%(BarePeer)s, %(XML)s, %(Body)s, %(SType)s, "
-				 "%(Nick)s);")];
+                [?SQL_INSERT(
+                    "archive",
+                    ["username=%(SUser)s",
+                     "server_host=%(LServer)s",
+                     "timestamp=%(TStmp)d",
+                     "peer=%(LPeer)s",
+                     "bare_peer=%(BarePeer)s",
+                     "xml=%(XML)s",
+                     "txt=%(Body)s",
+                     "kind=%(SType)s",
+                     "nick=%(Nick)s"])];
          (_Host, _R) ->
               []
       end}].
