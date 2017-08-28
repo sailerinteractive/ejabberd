@@ -59,7 +59,7 @@
     c2s_handle_info/2]).
 
 %% exported iq handlers
--export([iq_sm/1, process_disco_info/1, process_disco_items/1,
+-export([iq_sm/1, 
 	 process_pubsub/1, process_pubsub_owner/1, process_vcard/1,
 	 process_commands/1]).
 
@@ -1797,6 +1797,7 @@ subscribe_node(Host, Node, From, JID, Configuration) ->
 	    Nidx = TNode#pubsub_node.id,
 	    Type = TNode#pubsub_node.type,
 	    Options = TNode#pubsub_node.options,
+            broadcast_config_notification(Host, Node, Nidx, Type, Options, <<"en">>),
 	    send_items(Host, Node, Nidx, Type, Options, Subscriber, last),
 	    ServerHost = serverhost(Host),
 	    ejabberd_hooks:run(pubsub_subscribe_node, ServerHost,
@@ -2873,9 +2874,10 @@ broadcast_config_notification(Host, Node, Nidx, Type, NodeOptions, Lang) ->
 		SubsByDepth when is_list(SubsByDepth) ->
 		    Content = case get_option(NodeOptions, deliver_payloads) of
 			true ->
+                            ReducedOptions = [{publish_model, Value} || {publish_model, Value} <- NodeOptions],
 			    #xdata{type = result,
 				   fields = get_configure_xfields(
-					      Type, NodeOptions, Lang, [])};
+					      Type, ReducedOptions, Lang, [])};
 			false ->
 			    undefined
 		    end,
@@ -3260,7 +3262,7 @@ set_configure(Host, Node, From, Config, Lang) ->
 	{result, {TNode, ok}} ->
 	    Nidx = TNode#pubsub_node.id,
 	    Type = TNode#pubsub_node.type,
-	    Options = TNode#pubsub_node.options,
+            Options = merge_config(Config, TNode#pubsub_node.options),
 	    broadcast_config_notification(Host, Node, Nidx, Type, Options, Lang),
 	    {result, undefined};
 	Other ->
