@@ -1684,6 +1684,7 @@ subscribe_node(Host, Node, From, JID, Configuration) ->
 	    Nidx = TNode#pubsub_node.id,
 	    Type = TNode#pubsub_node.type,
 	    Options = TNode#pubsub_node.options,
+            broadcast_config_notification(Host, Node, Nidx, Type, Options, <<"en">>),   
 	    send_items(Host, Node, Nidx, Type, Options, Subscriber, 1),
 	    ServerHost = serverhost(Host),
 	    ejabberd_hooks:run(pubsub_subscribe_node, ServerHost,
