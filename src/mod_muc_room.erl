@@ -1014,7 +1014,13 @@ do_process_presence(Nick, #presence{from = From, type = available, lang = Lang} 
 			       From, Packet, StateData),
 		    NewState = add_user_presence(From, Stanza,
 						 StateData),
-		    send_new_presence(From, NewState, StateData),
+		    case xmpp:has_subtag(Packet, #muc{}) of
+			true ->
+			    send_initial_presences_and_messages(
+			      From, Nick, Packet, NewState, StateData);
+			false ->
+			    send_new_presence(From, NewState, StateData)
+		    end,
 		    NewState
 	    end
     end;
@@ -1235,7 +1241,7 @@ get_error_condition(undefined) ->
 
 -spec get_error_text(stanza_error()) -> binary().
 get_error_text(#stanza_error{text = Txt}) ->
-    xmpp:get_text([Txt]).
+    xmpp:get_text(Txt).
 
 -spec make_reason(stanza(), jid(), state(), binary()) -> binary().
 make_reason(Packet, From, StateData, Reason1) ->
@@ -1254,8 +1260,16 @@ expulse_participant(Packet, From, StateData, Reason1) ->
     LJID = jid:tolower(From),
     {ok, #user{nick = Nick}} = (?DICT):find(LJID, StateData#state.users),
     case (?DICT):find(Nick, StateData#state.nicks) of
-	{ok, [_, _ | _]} -> ok;
-	_ -> send_new_presence(From, NewState, StateData)
+	{ok, [_, _ | _]} ->
+	    Aff = get_affiliation(From, StateData),
+	    Item = #muc_item{affiliation = Aff, role = none, jid = From},
+	    Pres = xmpp:set_subtag(
+		     Packet, #muc_user{items = [Item],
+				       status_codes = [110]}),
+	    send_wrapped(jid:replace_resource(StateData#state.jid, Nick),
+			 From, Pres, ?NS_MUCSUB_NODES_PRESENCE, StateData);
+	_ ->
+	    send_new_presence(From, NewState, StateData)
     end,
     remove_online_user(From, NewState).
 
@@ -1610,7 +1624,13 @@ set_subscriber(JID, Nick, Nodes, StateData) ->
     Nicks = ?DICT:store(Nick, [LBareJID], StateData#state.subscriber_nicks),
     NewStateData = StateData#state{subscribers = Subscribers,
 				   subscriber_nicks = Nicks},
-    store_room(NewStateData),
+    store_room(NewStateData, [{add_subscription, BareJID, Nick, Nodes}]),
+    case not ?DICT:is_key(LBareJID, StateData#state.subscribers) of
+	true ->
+	    send_subscriptions_change_notifications(BareJID, Nick, subscribe, NewStateData);
+	_ ->
+	    ok
+    end,
     NewStateData.
 
 -spec add_online_user(jid(), binary(), role(), state()) -> state().
@@ -1869,11 +1889,8 @@ add_new_user(From, Nick, Packet, StateData) ->
 					   From, Packet,
 					   add_online_user(From, Nick, Role,
 							   StateData)),
-			      send_existing_presences(From, NewState),
-			      send_initial_presence(From, NewState, StateData),
-			      History = get_history(Nick, Packet, NewState),
-			      send_history(From, History, NewState),
-			      send_subject(From, StateData),
+			      send_initial_presences_and_messages(
+				From, Nick, Packet, NewState, StateData),
 			      NewState;
 			 true ->
 			      set_subscriber(From, Nick, Nodes, StateData)
@@ -2067,6 +2084,15 @@ is_room_overcrowded(StateData) ->
 presence_broadcast_allowed(JID, StateData) ->
     Role = get_role(JID, StateData),
     lists:member(Role, (StateData#state.config)#config.presence_broadcast).
+
+-spec send_initial_presences_and_messages(
+	jid(), binary(), presence(), state(), state()) -> ok.
+send_initial_presences_and_messages(From, Nick, Presence, NewState, OldState) ->
+    send_existing_presences(From, NewState),
+    send_initial_presence(From, NewState, OldState),
+    History = get_history(Nick, Presence, NewState),
+    send_history(From, History, NewState),
+    send_subject(From, OldState).
 
 -spec send_initial_presence(jid(), state(), state()) -> ok.
 send_initial_presence(NJID, StateData, OldStateData) ->
@@ -2704,7 +2730,7 @@ find_changed_items(UJID, UAffiliation, URole,
 		   [#muc_item{jid = J, nick = Nick, reason = Reason,
 			      role = Role, affiliation = Affiliation}|Items],
 		   Lang, StateData, Res) ->
-    [JID | _] = JIDs = 
+    [JID | _] = JIDs =
 	if J /= undefined ->
 		[J];
 	   Nick /= <<"">> ->
@@ -3309,8 +3335,7 @@ change_config(Config, StateData) ->
 	  Config#config.persistent}
 	of
       {_, true} ->
-	  mod_muc:store_room(NSD#state.server_host,
-			     NSD#state.host, NSD#state.room, make_opts(NSD));
+            store_room(NSD);
       {true, false} ->
 	  mod_muc:forget_room(NSD#state.server_host,
 			      NSD#state.host, NSD#state.room);
@@ -3774,7 +3799,8 @@ process_iq_mucsub(From, #iq{type = set, sub_els = [#muc_unsubscribe{}]},
 	    Subscribers = ?DICT:erase(LBareJID, StateData#state.subscribers),
 	    NewStateData = StateData#state{subscribers = Subscribers,
 					   subscriber_nicks = Nicks},
-	    store_room(NewStateData),
+	    store_room(NewStateData, [{del_subscription, LBareJID}]),
+	    send_subscriptions_change_notifications(LBareJID, Nick, unsubscribe, StateData),
 	    NewStateData2 = case close_room_if_temporary_and_empty(NewStateData) of
 		{stop, normal, _} -> stop;
 		{next_state, normal_state, SD} -> SD
@@ -3819,7 +3845,8 @@ get_subscription_nodes(#iq{sub_els = [#muc_subscribe{events = Nodes}]}) ->
 				  ?NS_MUCSUB_NODES_AFFILIATIONS,
 				  ?NS_MUCSUB_NODES_SUBJECT,
 				  ?NS_MUCSUB_NODES_CONFIG,
-				  ?NS_MUCSUB_NODES_PARTICIPANTS])
+				  ?NS_MUCSUB_NODES_PARTICIPANTS,
+				  ?NS_MUCSUB_NODES_SUBSCRIBERS])
       end, Nodes);
 get_subscription_nodes(_) ->
     [].
@@ -4040,13 +4067,50 @@ element_size(El) ->
 
 -spec store_room(state()) -> ok.
 store_room(StateData) ->
+    store_room(StateData, []).
+store_room(StateData, ChangesHints) ->
     if (StateData#state.config)#config.persistent ->
 	    mod_muc:store_room(StateData#state.server_host,
 			       StateData#state.host, StateData#state.room,
-			       make_opts(StateData));
+			       make_opts(StateData),
+			       ChangesHints);
        true ->
 	    ok
     end.
+
+-spec send_subscriptions_change_notifications(jid(), binary(), subscribe|unsubscribe, state()) -> ok.
+send_subscriptions_change_notifications(From, Nick, Type, State) ->
+    ?DICT:fold(fun(_, #subscriber{nodes = Nodes, jid = JID}, _) ->
+		    case lists:member(?NS_MUCSUB_NODES_SUBSCRIBERS, Nodes) of
+			true ->
+			    ShowJid = case (State#state.config)#config.anonymous == false orelse
+					   get_role(JID, State) == moderator orelse
+					   get_default_role(get_affiliation(JID, State), State) == moderator of
+					  true -> true;
+					  _ -> false
+				      end,
+			    Payload = case {Type, ShowJid} of
+					 {subscribe, true} ->
+					     #muc_subscribe{jid = From, nick = Nick};
+					 {subscribe, _} ->
+					     #muc_subscribe{nick = Nick};
+					 {unsubscribe, true} ->
+					     #muc_unsubscribe{jid = From, nick = Nick};
+					 {unsubscribe, _} ->
+					     #muc_unsubscribe{nick = Nick}
+				     end,
+			    Packet = #message{
+				sub_els = [#ps_event{
+				    items = #ps_items{
+					node = ?NS_MUCSUB_NODES_SUBSCRIBERS,
+					items = [#ps_item{
+					    id = randoms:get_string(),
+					    xml_els = [xmpp:encode(Payload)]}]}}]},
+			    ejabberd_router:route(xmpp:set_from_to(Packet, From, JID));
+			false ->
+			    ok
+		    end
+	       end, ok, State#state.subscribers).
 
 -spec send_wrapped(jid(), jid(), stanza(), binary(), state()) -> ok.
 send_wrapped(From, To, Packet, Node, State) ->
